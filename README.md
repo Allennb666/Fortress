@@ -7,7 +7,23 @@
 - 试玩地址: [https://allennb666.github.io/Fortress/](https://allennb666.github.io/Fortress/)
 - GitHub 仓库: [https://github.com/Allennb666/Fortress](https://github.com/Allennb666/Fortress)
 
-![Fortress screenshot](docs/fortress-screenshot.png)
+## 截图预览
+
+主界面与成长面板
+
+![Fortress home screen](docs/fortress-home.png)
+
+模式选择区域
+
+![Fortress mode selection](docs/fortress-modes.png)
+
+堡垒升级、补给和错题入口
+
+![Fortress systems panel](docs/fortress-systems.png)
+
+战斗界面
+
+![Fortress battle screen](docs/fortress-battle.png)
 
 ## 项目简介
 
