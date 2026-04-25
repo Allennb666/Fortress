@@ -7,6 +7,8 @@
 - 试玩地址: [https://allennb666.github.io/Fortress/](https://allennb666.github.io/Fortress/)
 - GitHub 仓库: [https://github.com/Allennb666/Fortress](https://github.com/Allennb666/Fortress)
 
+![Fortress screenshot](docs/fortress-screenshot.png)
+
 ## 项目简介
 
 `Fortress` 的核心玩法是:
