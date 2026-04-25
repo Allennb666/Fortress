@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createEmptyInventory, difficultyConfig, shopItems } from "./gameData";
 
-const STORAGE_KEY = "word_fortress_profile_v1";
+const LEGACY_PROFILE_KEY = "word_fortress_profile_v1";
+const ACCOUNT_INDEX_KEY = "word_fortress_accounts_v1";
+const SESSION_KEY = "word_fortress_session_v1";
+const PROFILE_KEY_PREFIX = "word_fortress_profile_user_v1::";
 const START_Y = 8;
 const ENEMY_LANES = [12, 31, 50, 69, 88];
 const MASTERED_STREAK = 2;
@@ -35,6 +38,56 @@ const HOME_MODE_OPTIONS = [
   { id: "medium", label: "中等", desc: "词更难，速度适中", icon: "M" },
   { id: "hard", label: "困难", desc: "高分挑战，血量更少", icon: "H" },
   { id: "custom", label: "自定义", desc: "使用自己的词库", icon: "DIY" }
+];
+const HOME_ITEM_ICONS = {
+  skipPack: "杀",
+  shieldBoost: "盾",
+  slowChip: "缓",
+  scoreBoost: "赏",
+  freezeBomb: "冻",
+  clearBomb: "爆"
+};
+const FORTRESS_MODULES = [
+  {
+    id: "wall",
+    name: "城墙",
+    icon: "墙",
+    desc: "提高基地容错，每级开局基地血量 +1。",
+    levels: [
+      { cost: 140, summary: "基地血量 +1" },
+      { cost: 260, summary: "基地血量再 +1" },
+      { cost: 420, summary: "基地血量再 +1" }
+    ]
+  },
+  {
+    id: "cryo",
+    name: "冰库",
+    icon: "冻",
+    desc: "增强冻结脉冲，每级额外延长 1 秒冻结时间。",
+    levels: [
+      { cost: 120, summary: "冻结时长 4 秒" },
+      { cost: 220, summary: "冻结时长 5 秒" },
+      { cost: 360, summary: "冻结时长 6 秒" }
+    ]
+  },
+  {
+    id: "command",
+    name: "指挥台",
+    icon: "令",
+    desc: "提升连击收益。连击生效时，每级额外提升 8% 得分倍率。",
+    levels: [
+      { cost: 160, summary: "连击额外收益 +8%" },
+      { cost: 280, summary: "连击额外收益 +16%" },
+      { cost: 420, summary: "连击额外收益 +24%" }
+    ]
+  }
+];
+const PLAYER_AVATARS = [
+  { id: "guard", label: "守卫", glyph: "守" },
+  { id: "spark", label: "星核", glyph: "星" },
+  { id: "cat", label: "喵兵", glyph: "喵" },
+  { id: "fox", label: "狐影", glyph: "狐" },
+  { id: "shield", label: "钢盾", glyph: "盾" }
 ];
 const ZH_ALIAS_MAP = {
   书: ["书本"],
@@ -87,6 +140,22 @@ function createGameState() {
   };
 }
 
+function createEmptyProfile() {
+  return {
+    wallet: 0,
+    lifetimeScore: 0,
+    inventory: createEmptyInventory(),
+    mistakes: [],
+    avatar: PLAYER_AVATARS[0].id,
+    bestCombo: 0,
+    fortress: {
+      wall: 0,
+      cryo: 0,
+      command: 0
+    }
+  };
+}
+
 function buildWordId(word) {
   const en = String(word?.en || "").trim().toLowerCase();
   const zh = String(word?.zh || "").trim();
@@ -105,6 +174,37 @@ function findWordDetail(word) {
   const idMatch = WORD_DETAIL_LOOKUP.get(buildWordId(word));
   if (idMatch) return idMatch;
   return WORD_DETAIL_LOOKUP.get(String(word?.en || "").trim().toLowerCase()) || null;
+}
+
+function normalizeFortress(raw) {
+  return {
+    wall: Math.max(0, Math.min(3, Number(raw?.wall) || 0)),
+    cryo: Math.max(0, Math.min(3, Number(raw?.cryo) || 0)),
+    command: Math.max(0, Math.min(3, Number(raw?.command) || 0))
+  };
+}
+
+function getFortressEffects(profile) {
+  const fortress = normalizeFortress(profile?.fortress);
+  return {
+    levels: fortress,
+    wallHpBonus: fortress.wall,
+    freezeDurationMs: 3000 + fortress.cryo * 1000,
+    freezeDurationLabel: `${3 + fortress.cryo} 秒`,
+    comboBonusMultiplier: fortress.command > 0 ? 1 + fortress.command * 0.08 : 1
+  };
+}
+
+function getPlayerAvatar(profile) {
+  return PLAYER_AVATARS.find((avatar) => avatar.id === profile?.avatar) || PLAYER_AVATARS[0];
+}
+
+function getRankIcon(level) {
+  if (level >= 12) return "冠";
+  if (level >= 9) return "曜";
+  if (level >= 6) return "锋";
+  if (level >= 3) return "盾";
+  return "芽";
 }
 
 function hasWordDetail(value) {
@@ -206,18 +306,12 @@ function addMistakesToProfile(profile, words, source) {
   };
 }
 
-function loadProfile() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return {
-        wallet: 0,
-        lifetimeScore: 0,
-        inventory: createEmptyInventory(),
-        mistakes: []
-      };
-    }
+function parseProfile(raw) {
+  if (!raw) {
+    return createEmptyProfile();
+  }
 
+  try {
     const parsed = JSON.parse(raw);
     return {
       wallet: Number(parsed.wallet) || 0,
@@ -226,16 +320,99 @@ function loadProfile() {
         ...createEmptyInventory(),
         ...(parsed.inventory || {})
       },
-      mistakes: normalizeMistakeBook(parsed.mistakes)
+      mistakes: normalizeMistakeBook(parsed.mistakes),
+      avatar: PLAYER_AVATARS.some((avatar) => avatar.id === parsed.avatar) ? parsed.avatar : PLAYER_AVATARS[0].id,
+      bestCombo: Math.max(0, Number(parsed.bestCombo) || 0),
+      fortress: normalizeFortress(parsed.fortress)
     };
   } catch (_error) {
-    return {
-      wallet: 0,
-      lifetimeScore: 0,
-      inventory: createEmptyInventory(),
-      mistakes: []
-    };
+    return createEmptyProfile();
   }
+}
+
+function cleanAccountName(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function normalizeAccountKey(value) {
+  return cleanAccountName(value).toLowerCase();
+}
+
+function loadAccounts() {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_INDEX_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((account) => {
+        const username = cleanAccountName(account?.username);
+        const id = normalizeAccountKey(account?.id || username);
+        if (!username || !id) return null;
+        return {
+          id,
+          username,
+          password: String(account?.password || "")
+        };
+      })
+      .filter(Boolean);
+  } catch (_error) {
+    return [];
+  }
+}
+
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    const session = normalizeAccountKey(raw);
+    return session || "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function saveSession(accountId) {
+  if (!accountId) {
+    localStorage.removeItem(SESSION_KEY);
+    return;
+  }
+  localStorage.setItem(SESSION_KEY, normalizeAccountKey(accountId));
+}
+
+function getProfileStorageKey(accountId) {
+  return `${PROFILE_KEY_PREFIX}${normalizeAccountKey(accountId)}`;
+}
+
+function loadLegacyProfile() {
+  try {
+    return parseProfile(localStorage.getItem(LEGACY_PROFILE_KEY));
+  } catch (_error) {
+    return createEmptyProfile();
+  }
+}
+
+function hasLegacyProfileData() {
+  try {
+    const raw = localStorage.getItem(LEGACY_PROFILE_KEY);
+    if (!raw) return false;
+    const profile = parseProfile(raw);
+    return profile.wallet > 0 || profile.lifetimeScore > 0 || profile.mistakes.length > 0 || Object.values(profile.inventory).some((count) => count > 0);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function loadProfileForAccount(accountId) {
+  if (!accountId) return createEmptyProfile();
+  try {
+    return parseProfile(localStorage.getItem(getProfileStorageKey(accountId)));
+  } catch (_error) {
+    return createEmptyProfile();
+  }
+}
+
+function saveAccounts(accounts) {
+  localStorage.setItem(ACCOUNT_INDEX_KEY, JSON.stringify(accounts));
 }
 
 function getXpGoal(level) {
@@ -390,7 +567,8 @@ function applyBattleMomentum(gameLike) {
   const mistakeStep = getMistakeStep(gameLike.mistakeStreak || 0);
   const baseSpeed = Number(gameLike.baseSpeed) || Number(gameLike.speed) || 0;
   const baseScoreMultiplier = Number(gameLike.baseScoreMultiplier) || 1;
-  const comboMultiplier = comboStep?.multiplier || 1;
+  const commandBonusMultiplier = comboStep ? Number(gameLike.comboBonusMultiplier) || 1 : 1;
+  const comboMultiplier = (comboStep?.multiplier || 1) * commandBonusMultiplier;
   const speedUp = comboStep?.speedMultiplier || 1;
   const speedDown = mistakeStep?.speedMultiplier || 1;
 
@@ -517,7 +695,9 @@ function pickLane(enemies) {
 
 export default function App() {
   const [screen, setScreen] = useState("home");
-  const [profile, setProfile] = useState(loadProfile);
+  const [accounts, setAccounts] = useState(loadAccounts);
+  const [authUserId, setAuthUserId] = useState(loadSession);
+  const [profile, setProfile] = useState(() => loadProfileForAccount(loadSession()));
   const [game, setGame] = useState(createGameState);
   const [answer, setAnswer] = useState("");
   const [selectedMode, setSelectedMode] = useState("easy");
@@ -525,6 +705,8 @@ export default function App() {
   const [customWordsText, setCustomWordsText] = useState("apple:苹果|水果\nbook:书|书本\ntravel:旅行|旅游");
   const [customSpeed, setCustomSpeed] = useState(85);
   const [homeNote, setHomeNote] = useState("准备就绪。选择一个关卡开始，或先去商店购买道具。");
+  const [authMessage, setAuthMessage] = useState("注册账号后，积分、道具和错题本会按账号分别保存。");
+  const [fortressMessage, setFortressMessage] = useState("升级堡垒模块，让每一局的容错和收益稳步提升。");
   const [shopMessage, setShopMessage] = useState({ text: "被动道具会在下一局自动加载，主动道具可在战斗中点击使用。", type: "ok" });
   const [gameMessage, setGameMessage] = useState({ text: "", type: "ok" });
   const [resultSummary, setResultSummary] = useState("");
@@ -558,15 +740,54 @@ export default function App() {
     seenWords: [],
     reviewMap: new Map()
   });
+  const authUser = useMemo(
+    () => accounts.find((account) => account.id === authUserId) || null,
+    [accounts, authUserId]
+  );
+  const legacyProfileAvailable = useMemo(() => hasLegacyProfileData(), []);
+  const fortressEffects = useMemo(() => getFortressEffects(profile), [profile]);
 
   useEffect(() => {
     profileRef.current = profile;
+  }, [profile]);
+
+  useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
+      saveAccounts(accounts);
+    } catch (_error) {
+      setAuthMessage("浏览器暂时无法写入账号信息，请检查无痕模式或存储权限。");
+    }
+  }, [accounts]);
+
+  useEffect(() => {
+    try {
+      if (!authUserId) return;
+      localStorage.setItem(getProfileStorageKey(authUserId), JSON.stringify(profile));
     } catch (_error) {
       setHomeNote("浏览器暂时无法写入本地存储，错题本可能无法保存。");
     }
-  }, [profile]);
+  }, [profile, authUserId]);
+
+  useEffect(() => {
+    if (!authUserId) {
+      setProfile(createEmptyProfile());
+      setScreen("home");
+      return;
+    }
+
+    const accountExists = accounts.some((account) => account.id === authUserId);
+    if (!accountExists) {
+      setAuthUserId("");
+      saveSession("");
+      setProfile(createEmptyProfile());
+      return;
+    }
+
+    saveSession(authUserId);
+    const nextProfile = loadProfileForAccount(authUserId);
+    profileRef.current = nextProfile;
+    setProfile(nextProfile);
+  }, [accounts, authUserId]);
 
   useEffect(() => {
     gameRef.current = game;
@@ -601,6 +822,10 @@ export default function App() {
     if (!game.running || game.enemies.length === 0) {
       if (rafRef.current) {
         cancelAnimationFrame(rafRef.current);
+      }
+      if (dangerLevelRef.current) {
+        dangerLevelRef.current = "";
+        setDangerLevel("");
       }
       return undefined;
     }
@@ -1210,6 +1435,12 @@ export default function App() {
     );
 
     if (countsAsCombo) {
+      if (nextCombo > (profileRef.current.bestCombo || 0)) {
+        updateProfile((prev) => ({
+          ...prev,
+          bestCombo: nextCombo
+        }));
+      }
       triggerComboFlash(nextCombo);
     }
 
@@ -1247,8 +1478,8 @@ export default function App() {
 
     const baseGame = {
       mode,
-      hp: base.hp,
-      maxHp: base.hp,
+      hp: base.hp + fortressEffects.wallHpBonus,
+      maxHp: base.hp + fortressEffects.wallHpBonus,
       score: 0,
       kills: 0,
       combo: 0,
@@ -1258,6 +1489,7 @@ export default function App() {
       speed: speedOverride || base.speed,
       points: base.points,
       baseScoreMultiplier: 1,
+      comboBonusMultiplier: fortressEffects.comboBonusMultiplier,
       scoreMultiplier: 1,
       totalEnemies: words.length,
       spawnedEnemies: 0,
@@ -1274,6 +1506,7 @@ export default function App() {
     setAnswer("");
     setBursts([]);
     setBattlefieldPulse(false);
+    setRewardPulse(false);
     setComboFlash(null);
     setScreen("game");
     updateProfile(nextProfile);
@@ -1287,6 +1520,113 @@ export default function App() {
     if (nextGame.spawnedEnemies < nextGame.totalEnemies) {
       queueSpawnTick(nextGame.spawnDelay);
     }
+  }
+
+  function resetBattleSession() {
+    clearSessionActivity();
+    const freshGame = createGameState();
+    sessionRef.current = {
+      wordPool: [],
+      seenWords: [],
+      reviewMap: new Map()
+    };
+    setAnswer("");
+    setBursts([]);
+    setBattlefieldPulse(false);
+    setRewardPulse(false);
+    setComboFlash(null);
+    setDangerLevel("");
+    dangerLevelRef.current = "";
+    gameRef.current = freshGame;
+    enemiesRef.current = freshGame.enemies;
+    setGame(freshGame);
+    setReviewWords([]);
+    setResultSummary("");
+    setGameMessage({ text: "", type: "ok" });
+  }
+
+  function registerAccount({ username, password, confirmPassword }) {
+    const cleanUsername = cleanAccountName(username);
+    const accountId = normalizeAccountKey(cleanUsername);
+    const cleanPassword = String(password || "");
+
+    if (cleanUsername.length < 2) {
+      setAuthMessage("用户名至少 2 个字符。");
+      return false;
+    }
+    if (cleanUsername.length > 18) {
+      setAuthMessage("用户名建议控制在 18 个字符以内。");
+      return false;
+    }
+    if (cleanPassword.length < 4) {
+      setAuthMessage("密码至少 4 位。");
+      return false;
+    }
+    if (cleanPassword !== String(confirmPassword || "")) {
+      setAuthMessage("两次输入的密码不一致。");
+      return false;
+    }
+    if (accounts.some((account) => account.id === accountId)) {
+      setAuthMessage("这个用户名已经注册过了，换一个试试。");
+      return false;
+    }
+
+    const nextAccount = {
+      id: accountId,
+      username: cleanUsername,
+      password: cleanPassword
+    };
+    const shouldImportLegacy = accounts.length === 0 && legacyProfileAvailable;
+    const importedProfile = shouldImportLegacy ? loadLegacyProfile() : createEmptyProfile();
+
+    setAccounts((prev) => [...prev, nextAccount]);
+    saveSession(accountId);
+    setAuthUserId(accountId);
+    profileRef.current = importedProfile;
+    setProfile(importedProfile);
+    setHomeNote(
+      shouldImportLegacy
+        ? `欢迎，${cleanUsername}。已帮你继承当前浏览器里的本地进度。`
+        : `欢迎，${cleanUsername}。现在开始建立你的专属词库存档。`
+    );
+    setAuthMessage(`注册成功，${cleanUsername} 已进入堡垒。`);
+    setScreen("home");
+    resetBattleSession();
+    return true;
+  }
+
+  function loginAccount({ username, password }) {
+    const accountId = normalizeAccountKey(username);
+    const account = accounts.find((entry) => entry.id === accountId);
+
+    if (!account || account.password !== String(password || "")) {
+      setAuthMessage("用户名或密码不正确。");
+      return false;
+    }
+
+    const nextProfile = loadProfileForAccount(account.id);
+    saveSession(account.id);
+    setAuthUserId(account.id);
+    profileRef.current = nextProfile;
+    setProfile(nextProfile);
+    setHomeNote(`欢迎回来，${account.username}。继续守住你的单词堡垒。`);
+    setAuthMessage(`登录成功，${account.username} 已连接到本地存档。`);
+    setScreen("home");
+    resetBattleSession();
+    return true;
+  }
+
+  function logoutAccount() {
+    saveSession("");
+    setAuthUserId("");
+    profileRef.current = createEmptyProfile();
+    setProfile(createEmptyProfile());
+    setHomeNote("已退出登录。重新登录后可以继续你的个人存档。");
+    setAuthMessage("你已退出当前账号，本地账号数据仍会保留在这台设备上。");
+    setSelectedMode("easy");
+    setShowCustom(false);
+    setScreen("home");
+    resetBattleSession();
   }
 
   function handleModeSelect(mode) {
@@ -1371,6 +1711,36 @@ export default function App() {
     setShopMessage({ text: `购买成功：${item.name} +1`, type: "ok" });
   }
 
+  function upgradeFortress(moduleId) {
+    const module = FORTRESS_MODULES.find((entry) => entry.id === moduleId);
+    if (!module) return;
+
+    const currentLevel = fortressEffects.levels[moduleId] || 0;
+    const nextLevelData = module.levels[currentLevel];
+
+    if (!nextLevelData) {
+      setFortressMessage(`${module.name} 已经升到满级了。`);
+      return;
+    }
+
+    if (profileRef.current.wallet < nextLevelData.cost) {
+      setFortressMessage(`${module.name} 升级需要 ${nextLevelData.cost} 积分，当前还不够。`);
+      return;
+    }
+
+    updateProfile((prev) => ({
+      ...prev,
+      wallet: prev.wallet - nextLevelData.cost,
+      fortress: {
+        ...normalizeFortress(prev.fortress),
+        [moduleId]: currentLevel + 1
+      }
+    }));
+
+    playSfx("buy");
+    setFortressMessage(`${module.name} 升到 Lv ${currentLevel + 1}：${nextLevelData.summary}`);
+  }
+
   function buySkipInBattle() {
     const current = gameRef.current;
     if (current.score < 30) {
@@ -1446,10 +1816,10 @@ export default function App() {
         frozen: false
       }));
       freezeTimerRef.current = null;
-    }, 3000);
+    }, fortressEffects.freezeDurationMs);
 
     playSfx("buy");
-    setGameMessage({ text: "冻结脉冲启动，场上怪物暂停 3 秒。", type: "ok" });
+    setGameMessage({ text: `冻结脉冲启动，场上怪物暂停 ${fortressEffects.freezeDurationLabel}。`, type: "ok" });
   }
 
   function useClearBomb() {
@@ -1495,7 +1865,8 @@ export default function App() {
       enemies: []
     }));
 
-    playSfx("hit");
+    flashRewardPulse();
+    playSfx("hit", { combo: current.combo });
     setGameMessage({ text: `清屏炸弹清除了 ${targets.length} 个怪物，+${gained} 分。`, type: "ok" });
 
     if (current.spawnedEnemies >= current.totalEnemies) {
@@ -1545,14 +1916,26 @@ export default function App() {
 
   return (
     <div className="app">
+      <InteractiveBackground />
       <div className="scanlines" aria-hidden="true" />
 
       <main className="shell">
-        {screen === "home" && (
+        {!authUser && (
+          <AuthScreen
+            authMessage={authMessage}
+            hasLegacyProfile={legacyProfileAvailable && accounts.length === 0}
+            onLogin={loginAccount}
+            onRegister={registerAccount}
+          />
+        )}
+
+        {authUser && screen === "home" && (
           <HomeScreen
             profile={profile}
+            playerName={authUser.username}
             inventoryText={inventoryText}
             homeNote={homeNote}
+            fortress={fortressEffects}
             showCustom={showCustom}
             customWordsText={customWordsText}
             customSpeed={customSpeed}
@@ -1567,6 +1950,8 @@ export default function App() {
             onOpenMistakes={() => setScreen("mistakes")}
             onStartMistakePractice={startMistakePractice}
             onOpenProgress={() => setScreen("progress")}
+            onOpenFortress={() => setScreen("fortress")}
+            onLogout={logoutAccount}
             onOpenShop={() => {
               setShopMessage({ text: "被动道具会在下一局自动加载，主动道具可在战斗中点击使用。", type: "ok" });
               setScreen("shop");
@@ -1574,7 +1959,7 @@ export default function App() {
           />
         )}
 
-        {screen === "progress" && (
+        {authUser && screen === "progress" && (
           <ProgressRoadScreen
             progressStats={progressStats}
             roadmap={levelRoadmap}
@@ -1583,7 +1968,17 @@ export default function App() {
           />
         )}
 
-        {screen === "shop" && (
+        {authUser && screen === "fortress" && (
+          <FortressScreen
+            wallet={profile.wallet}
+            fortress={fortressEffects}
+            fortressMessage={fortressMessage}
+            onUpgrade={upgradeFortress}
+            onBack={() => setScreen("home")}
+          />
+        )}
+
+        {authUser && screen === "shop" && (
           <ShopScreen
             wallet={profile.wallet}
             inventory={profile.inventory}
@@ -1593,7 +1988,7 @@ export default function App() {
           />
         )}
 
-        {screen === "mistakes" && (
+        {authUser && screen === "mistakes" && (
           <MistakeBookScreen
             mistakes={profile.mistakes}
             onBack={() => setScreen("home")}
@@ -1602,7 +1997,7 @@ export default function App() {
           />
         )}
 
-        {screen === "game" && (
+        {authUser && screen === "game" && (
           <GameScreen
             answer={answer}
             battlefieldPulse={battlefieldPulse}
@@ -1618,6 +2013,7 @@ export default function App() {
             rewardPulse={rewardPulse}
             registerEnemyNode={registerEnemyNode}
             remaining={remaining}
+            fortress={fortressEffects}
             onAnswerChange={setAnswer}
             onBuySkip={buySkipInBattle}
             onUseClearBomb={useClearBomb}
@@ -1627,7 +2023,7 @@ export default function App() {
           />
         )}
 
-        {screen === "result" && (
+        {authUser && screen === "result" && (
           <ResultScreen
             resultSummary={resultSummary}
             reviewWords={reviewWords}
@@ -1679,10 +2075,401 @@ function AnimatedNumber({ value, duration = 500 }) {
   return <>{display}</>;
 }
 
+function ParallaxSupportCard({ className = "", children }) {
+  const cardRef = useRef(null);
+  const frameRef = useRef(null);
+  const enabledRef = useRef(false);
+  const nextStyleRef = useRef({
+    rotateX: 0,
+    rotateY: 0,
+    scale: 1,
+    lift: 0,
+    glowX: 50,
+    glowY: 50
+  });
+
+  useEffect(() => {
+    const finePointer = window.matchMedia("(pointer: fine)").matches;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    enabledRef.current = finePointer && !reducedMotion;
+
+    return () => {
+      if (frameRef.current) {
+        cancelAnimationFrame(frameRef.current);
+      }
+    };
+  }, []);
+
+  function flushStyles() {
+    const node = cardRef.current;
+    if (!node) return;
+
+    const { rotateX, rotateY, scale, lift, glowX, glowY } = nextStyleRef.current;
+    node.style.setProperty("--card-rotate-x", `${rotateX.toFixed(2)}deg`);
+    node.style.setProperty("--card-rotate-y", `${rotateY.toFixed(2)}deg`);
+    node.style.setProperty("--card-scale", String(scale));
+    node.style.setProperty("--card-lift", `${lift.toFixed(2)}px`);
+    node.style.setProperty("--card-glow-x", `${glowX.toFixed(2)}%`);
+    node.style.setProperty("--card-glow-y", `${glowY.toFixed(2)}%`);
+    frameRef.current = null;
+  }
+
+  function scheduleStyles() {
+    if (frameRef.current) return;
+    frameRef.current = requestAnimationFrame(flushStyles);
+  }
+
+  function handleMouseMove(event) {
+    const node = cardRef.current;
+    if (!node || !enabledRef.current) return;
+
+    const rect = node.getBoundingClientRect();
+    const px = (event.clientX - rect.left) / rect.width;
+    const py = (event.clientY - rect.top) / rect.height;
+    const maxTilt = 8;
+
+    nextStyleRef.current = {
+      rotateX: (0.5 - py) * maxTilt * 2,
+      rotateY: (px - 0.5) * maxTilt * 2,
+      scale: 1.04,
+      lift: -4,
+      glowX: px * 100,
+      glowY: py * 100
+    };
+    scheduleStyles();
+  }
+
+  function handleMouseLeave() {
+    nextStyleRef.current = {
+      rotateX: 0,
+      rotateY: 0,
+      scale: 1,
+      lift: 0,
+      glowX: 50,
+      glowY: 50
+    };
+    scheduleStyles();
+  }
+
+  return (
+    <article
+      className={`support-card parallax-card ${className}`.trim()}
+      onMouseLeave={handleMouseLeave}
+      onMouseMove={handleMouseMove}
+      ref={cardRef}
+    >
+      {children}
+    </article>
+  );
+}
+
+function InteractiveBackground() {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return undefined;
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const hardware = navigator.hardwareConcurrency || 8;
+    const particleCount = reducedMotion ? 0 : hardware <= 4 ? 12 : 22;
+    if (particleCount === 0) return undefined;
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const mouse = { x: 0, y: 0, active: false, trail: 0 };
+    let width = 0;
+    let height = 0;
+    let rafId = 0;
+
+    const palette = [
+      [99, 232, 255],
+      [255, 210, 74],
+      [188, 227, 255]
+    ];
+
+    const particles = Array.from({ length: particleCount }, () => ({
+      x: Math.random(),
+      y: Math.random(),
+      radius: 1.2 + Math.random() * 2.8,
+      alpha: 0.18 + Math.random() * 0.22,
+      speed: 0.18 + Math.random() * 0.45,
+      driftX: 10 + Math.random() * 28,
+      driftY: 12 + Math.random() * 30,
+      twinkle: 0.8 + Math.random() * 1.6,
+      phase: Math.random() * Math.PI * 2,
+      color: palette[Math.floor(Math.random() * palette.length)]
+    }));
+
+    function resize() {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function handlePointerMove(event) {
+      mouse.x = event.clientX;
+      mouse.y = event.clientY;
+      mouse.active = true;
+      mouse.trail = 1;
+    }
+
+    function handlePointerLeave() {
+      mouse.active = false;
+    }
+
+    function draw(now) {
+      const t = now * 0.001;
+      ctx.clearRect(0, 0, width, height);
+
+      particles.forEach((particle) => {
+        let x = particle.x * width + Math.sin(t * particle.speed + particle.phase) * particle.driftX;
+        let y = particle.y * height + Math.cos(t * (particle.speed * 0.9) + particle.phase) * particle.driftY;
+
+        if (mouse.active) {
+          const dx = mouse.x - x;
+          const dy = mouse.y - y;
+          const distance = Math.hypot(dx, dy);
+          if (distance < 180) {
+            const influence = ((180 - distance) / 180) ** 2;
+            x += dx * 0.08 * influence;
+            y += dy * 0.08 * influence;
+          }
+        }
+
+        const alpha = particle.alpha * (0.72 + 0.28 * Math.sin(t * particle.twinkle + particle.phase));
+        const [r, g, b] = particle.color;
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(x, y, particle.radius, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      if (mouse.active || mouse.trail > 0.02) {
+        mouse.trail *= 0.92;
+        const gradient = ctx.createRadialGradient(mouse.x, mouse.y, 0, mouse.x, mouse.y, 120);
+        gradient.addColorStop(0, `rgba(99, 232, 255, ${(0.08 * mouse.trail).toFixed(3)})`);
+        gradient.addColorStop(0.45, `rgba(255, 210, 74, ${(0.045 * mouse.trail).toFixed(3)})`);
+        gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(mouse.x, mouse.y, 120, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      rafId = requestAnimationFrame(draw);
+    }
+
+    resize();
+    rafId = requestAnimationFrame(draw);
+    window.addEventListener("resize", resize);
+    window.addEventListener("pointermove", handlePointerMove, { passive: true });
+    window.addEventListener("pointerleave", handlePointerLeave);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.removeEventListener("resize", resize);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerleave", handlePointerLeave);
+    };
+  }, []);
+
+  return <canvas className="interactive-bg" ref={canvasRef} aria-hidden="true" />;
+}
+
+function AuthScreen({ authMessage, hasLegacyProfile, onLogin, onRegister }) {
+  const [mode, setMode] = useState("login");
+  const [loginForm, setLoginForm] = useState({ username: "", password: "" });
+  const [registerForm, setRegisterForm] = useState({
+    username: "",
+    password: "",
+    confirmPassword: ""
+  });
+
+  function submitLogin(event) {
+    event.preventDefault();
+    onLogin(loginForm);
+  }
+
+  function submitRegister(event) {
+    event.preventDefault();
+    onRegister(registerForm);
+  }
+
+  return (
+    <section className="screen active auth-screen">
+      <div className="terminal-window game-menu-shell auth-shell">
+        <header className="terminal-header menu-header">
+          <span>单词堡垒</span>
+          <span>账号连接</span>
+        </header>
+
+        <div className="terminal-body">
+          <div className="auth-layout">
+            <section className="menu-hero auth-hero">
+              <span className="eyebrow">本地账号</span>
+              <h1>登录堡垒</h1>
+              <p className="subtitle">注册或登录后，积分、道具、成长路线和错题本都会按账号独立保存。</p>
+
+              <div className="auth-tip-stack">
+                <div className="auth-tip-card">
+                  <strong>独立存档</strong>
+                  <span>每个账号都有自己的积分、等级、错题记录和装备库存。</span>
+                </div>
+                <div className="auth-tip-card">
+                  <strong>本地保存</strong>
+                  <span>当前是浏览器本地账号系统，不需要联网，适合先快速试玩。</span>
+                </div>
+                {hasLegacyProfile && (
+                  <div className="auth-tip-card highlight">
+                    <strong>进度继承</strong>
+                    <span>注册第一个账号时，会自动继承你当前浏览器里的旧进度。</span>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="auth-panel">
+              <div className="auth-switch">
+                <button
+                  className={`auth-switch-button${mode === "login" ? " active" : ""}`}
+                  onClick={() => setMode("login")}
+                  type="button"
+                >
+                  登录
+                </button>
+                <button
+                  className={`auth-switch-button${mode === "register" ? " active" : ""}`}
+                  onClick={() => setMode("register")}
+                  type="button"
+                >
+                  注册
+                </button>
+              </div>
+
+              {mode === "login" ? (
+                <form className="auth-form" onSubmit={submitLogin}>
+                  <label className="label" htmlFor="login-username">
+                    用户名
+                  </label>
+                  <input
+                    id="login-username"
+                    autoComplete="username"
+                    placeholder="输入你的用户名"
+                    type="text"
+                    value={loginForm.username}
+                    onChange={(event) =>
+                      setLoginForm((prev) => ({
+                        ...prev,
+                        username: event.target.value
+                      }))
+                    }
+                  />
+
+                  <label className="label" htmlFor="login-password">
+                    密码
+                  </label>
+                  <input
+                    id="login-password"
+                    autoComplete="current-password"
+                    placeholder="输入密码"
+                    type="password"
+                    value={loginForm.password}
+                    onChange={(event) =>
+                      setLoginForm((prev) => ({
+                        ...prev,
+                        password: event.target.value
+                      }))
+                    }
+                  />
+
+                  <button className="auth-submit-button" type="submit">
+                    进入堡垒
+                  </button>
+                </form>
+              ) : (
+                <form className="auth-form" onSubmit={submitRegister}>
+                  <label className="label" htmlFor="register-username">
+                    用户名
+                  </label>
+                  <input
+                    id="register-username"
+                    autoComplete="username"
+                    placeholder="2-18 个字符"
+                    type="text"
+                    value={registerForm.username}
+                    onChange={(event) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        username: event.target.value
+                      }))
+                    }
+                  />
+
+                  <label className="label" htmlFor="register-password">
+                    密码
+                  </label>
+                  <input
+                    id="register-password"
+                    autoComplete="new-password"
+                    placeholder="至少 4 位"
+                    type="password"
+                    value={registerForm.password}
+                    onChange={(event) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        password: event.target.value
+                      }))
+                    }
+                  />
+
+                  <label className="label" htmlFor="register-confirm-password">
+                    确认密码
+                  </label>
+                  <input
+                    id="register-confirm-password"
+                    autoComplete="new-password"
+                    placeholder="再输入一次密码"
+                    type="password"
+                    value={registerForm.confirmPassword}
+                    onChange={(event) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        confirmPassword: event.target.value
+                      }))
+                    }
+                  />
+
+                  <button className="auth-submit-button" type="submit">
+                    创建账号
+                  </button>
+                </form>
+              )}
+
+              <div className="auth-message-box">
+                <span className="label">状态</span>
+                <p>{authMessage}</p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function HomeScreen({
   profile,
+  playerName,
   inventoryText,
   homeNote,
+  fortress,
   showCustom,
   customWordsText,
   customSpeed,
@@ -1697,24 +2484,49 @@ function HomeScreen({
   onOpenMistakes,
   onStartMistakePractice,
   onOpenProgress,
+  onOpenFortress,
+  onLogout,
   onOpenShop
 }) {
   const selectedModeMeta = HOME_MODE_OPTIONS.find((mode) => mode.id === selectedMode) || HOME_MODE_OPTIONS[0];
+  const ownedItems = shopItems
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      short: item.short,
+      count: profile.inventory[item.id] || 0,
+      icon: HOME_ITEM_ICONS[item.id] || "?"
+    }))
+    .sort((a, b) => b.count - a.count);
+  const equippedItems = ownedItems.filter((item) => item.count > 0).slice(0, 4);
+  const totalItems = ownedItems.reduce((sum, item) => sum + item.count, 0);
+  const mistakeTitle = mistakeCount > 0 ? "待复仇" : "待复习";
+  const mistakeTone = mistakeCount > 0 ? "hot" : "calm";
+  const fortressSummary = `城墙 Lv ${fortress.levels.wall} · 冰库 Lv ${fortress.levels.cryo} · 指挥台 Lv ${fortress.levels.command}`;
+  const selectedAvatar = getPlayerAvatar(profile);
+  const rankIcon = getRankIcon(progressStats.level);
 
   return (
     <section className="screen active home-screen">
       <div className="terminal-window game-menu-shell">
         <header className="terminal-header menu-header">
           <span>单词堡垒</span>
-          <span>准备开始</span>
+          <div className="menu-header-user">
+            <span>{playerName}</span>
+            <button className="menu-logout-button" onClick={onLogout} type="button">
+              退出登录
+            </button>
+          </div>
         </header>
 
         <div className="terminal-body">
           <div className="menu-layout">
             <section className="menu-hero">
-              <span className="eyebrow">词义防线</span>
-              <h1>单词堡垒</h1>
-              <p className="subtitle">选一个关卡，输入中文翻译，守住基地。</p>
+              <div className="hero-copy">
+                <span className="eyebrow">词义防线</span>
+                <h1>单词堡垒</h1>
+                <p className="subtitle">选一个关卡，输入中文翻译，守住基地。</p>
+              </div>
             </section>
 
             <section className="menu-core">
@@ -1750,6 +2562,38 @@ function HomeScreen({
                 </section>
 
                 <div className="start-cluster">
+                  <div className="hero-player-panel">
+                    <div className="hero-player-top">
+                      <div className="hero-avatar-main">
+                        <span className="player-avatar-glyph">{selectedAvatar.glyph}</span>
+                      </div>
+
+                      <div className="hero-player-meta">
+                        <div className="hero-player-name-row">
+                          <strong>{playerName}</strong>
+                          <span className="rank-chip">
+                            <span className="rank-icon">{rankIcon}</span>
+                            Lv {progressStats.level}
+                          </span>
+                        </div>
+                        <p>{progressStats.title}</p>
+                      </div>
+                    </div>
+
+                    <div className="hero-player-stats">
+                      <div className="hero-player-stat-card spotlight">
+                        <span>积分</span>
+                        <strong>
+                          <AnimatedNumber value={profile.wallet} />
+                        </strong>
+                      </div>
+                      <div className="hero-player-stat-card">
+                        <span>最高连击</span>
+                        <strong>{profile.bestCombo || 0} 连</strong>
+                      </div>
+                    </div>
+                  </div>
+
                   <span className="selected-mode-chip">当前关卡：{selectedModeMeta.label}</span>
                   <button className="start-button" onClick={onStartSelected} type="button">
                     开始挑战
@@ -1810,43 +2654,104 @@ function HomeScreen({
             </section>
 
             <section className="support-strip">
-              <article className="support-card points-card">
-                <span className="label">积分</span>
-                <strong className="support-value">
-                  <AnimatedNumber value={profile.wallet} />
-                </strong>
-                <p className="support-note">累计积分会同步为等级经验。</p>
-              </article>
-
-              <article className="support-card">
-                <span className="label">道具</span>
-                <p className="support-note">{inventoryText}</p>
+              <ParallaxSupportCard className="fortress-summary-card reward-card">
+                <div className="support-head">
+                  <span className="support-icon fortress-icon">堡</span>
+                  <div>
+                    <span className="label">堡垒工坊</span>
+                    <p className="support-caption">长期强化会直接改变每一局的容错和收益。</p>
+                  </div>
+                </div>
+                <div className="support-value-row">
+                  <strong className="support-value reward-value">
+                    Lv {fortress.levels.wall + fortress.levels.cryo + fortress.levels.command}
+                  </strong>
+                  <span className="support-badge gold">总强化等级</span>
+                </div>
+                <div className="support-meter support-meter-gold" aria-hidden="true">
+                  <span
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        ((fortress.levels.wall + fortress.levels.cryo + fortress.levels.command) / 9) * 100
+                      )}%`
+                    }}
+                  />
+                </div>
+                <p className="support-note">
+                  {fortressSummary}。当前冻结 {fortress.freezeDurationLabel}，连击收益 +{Math.round((fortress.comboBonusMultiplier - 1) * 100)}%。
+                </p>
                 <div className="support-actions">
-                  <button className="support-button" onClick={onOpenShop} type="button">
-                    商店
+                  <button className="support-button fortress-button" onClick={onOpenFortress} type="button">
+                    升级堡垒
                   </button>
                 </div>
-              </article>
+              </ParallaxSupportCard>
 
-              <article className="support-card">
-                <span className="label">错题</span>
-                <strong className="support-value">
-                  <AnimatedNumber value={mistakeCount} />
-                </strong>
+              <ParallaxSupportCard className="gear-card">
+                <div className="support-head">
+                  <span className="support-icon gear-icon">装</span>
+                  <div>
+                    <span className="label">装备栏</span>
+                    <p className="support-caption">{totalItems > 0 ? `已拥有 ${totalItems} 件补给` : "补给槽位待填充"}</p>
+                  </div>
+                </div>
+                {equippedItems.length > 0 ? (
+                  <div className="gear-slot-grid">
+                    {equippedItems.map((item) => (
+                      <div className="gear-slot filled" key={item.id}>
+                        <span className="gear-slot-icon">{item.icon}</span>
+                        <div className="gear-slot-copy">
+                          <strong>{item.name}</strong>
+                          <span>持有 x{item.count}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="gear-empty-state">
+                    <span className="gear-slot-icon">+</span>
+                    <div className="gear-slot-copy">
+                      <strong>空槽位</strong>
+                      <span>去商店补充装备后，这里会显示你当前持有的补给。</span>
+                    </div>
+                  </div>
+                )}
+                <p className="support-note">这里只显示补给概览，详细效果可在商店查看。{inventoryText}</p>
                 <div className="support-actions">
-                  <button className="support-button" onClick={onOpenMistakes} type="button">
+                  <button className="support-button shop-button" onClick={onOpenShop} type="button">
+                    打开商店
+                  </button>
+                </div>
+              </ParallaxSupportCard>
+
+              <ParallaxSupportCard className={`revenge-card revenge-card-${mistakeTone}`}>
+                <div className="support-head">
+                  <span className="support-icon revenge-icon">复</span>
+                  <div>
+                    <span className="label">{mistakeTitle}</span>
+                    <p className="support-caption">
+                      {mistakeCount > 0 ? "这些词还在等你拿回胜场。" : "当前错题本已经清空。"}
+                    </p>
+                  </div>
+                </div>
+                <div className="support-value-row">
+                  <strong className="support-value revenge-value">
+                    <AnimatedNumber value={mistakeCount} />
+                  </strong>
+                  <span className={`support-badge ${mistakeCount > 0 ? "orange" : "calm"}`}>
+                    {mistakeCount > 0 ? "需要处理" : "状态良好"}
+                  </span>
+                </div>
+                <div className="support-actions">
+                  <button className="support-button revenge-button" onClick={onOpenMistakes} type="button">
                     查看
                   </button>
-                  <button className="support-button" onClick={onStartMistakePractice} type="button">
-                    练习
+                  <button className="support-button revenge-button" onClick={onStartMistakePractice} type="button">
+                    立即复习
                   </button>
                 </div>
-              </article>
-
-              <article className="support-card muted">
-                <span className="label">提示</span>
-                <p className="support-note">{homeNote}</p>
-              </article>
+              </ParallaxSupportCard>
             </section>
           </div>
         </div>
@@ -1869,107 +2774,224 @@ function formatWordDetail(value) {
   return value || "暂无";
 }
 
-function ProgressRoadScreen({ progressStats, roadmap, totalXp, onBack }) {
+function FortressScreen({ wallet, fortress, fortressMessage, onUpgrade, onBack }) {
   return (
     <section className="screen active">
+      <div className="terminal-window">
+        <header className="terminal-header">
+          <span>堡垒工坊</span>
+          <span>强化基地</span>
+        </header>
+        <div className="terminal-body fortress-body">
+          <div className="fortress-header">
+            <div>
+              <h2>基地升级</h2>
+              <p className="panel-note">把积分投入永久模块，让后续每一局都更稳、更强、更有收益。</p>
+            </div>
+            <div className="fortress-wallet">
+              <span className="label">当前积分</span>
+              <strong>
+                <AnimatedNumber value={wallet} />
+              </strong>
+            </div>
+          </div>
+
+          <div className="fortress-grid">
+            {FORTRESS_MODULES.map((module) => {
+              const level = fortress.levels[module.id] || 0;
+              const next = module.levels[level] || null;
+              const isMax = !next;
+              return (
+                <article className="shop-card fortress-card" key={module.id}>
+                  <div className="panel-head">
+                    <div className="fortress-card-head">
+                      <span className="fortress-module-icon">{module.icon}</span>
+                      <div>
+                        <strong>{module.name}</strong>
+                        <span>Lv {level} / {module.levels.length}</span>
+                      </div>
+                    </div>
+                    <span className={`support-badge ${isMax ? "calm" : "gold"}`}>{isMax ? "已满级" : `下级 ${next.cost}`}</span>
+                  </div>
+                  <p className="panel-note">{module.desc}</p>
+                  <div className="fortress-level-track" aria-hidden="true">
+                    {module.levels.map((_, index) => (
+                      <span className={index < level ? "filled" : ""} key={`${module.id}-${index}`} />
+                    ))}
+                  </div>
+                  <div className="fortress-module-meta">
+                    <span>当前效果</span>
+                    <strong>
+                      {module.id === "wall" && `基地血量 +${fortress.wallHpBonus}`}
+                      {module.id === "cryo" && `冻结时长 ${fortress.freezeDurationLabel}`}
+                      {module.id === "command" && `连击收益 +${Math.round((fortress.comboBonusMultiplier - 1) * 100)}%`}
+                    </strong>
+                  </div>
+                  <div className="fortress-module-meta next">
+                    <span>下一档</span>
+                    <strong>{next ? next.summary : "已达到最高强化"}</strong>
+                  </div>
+                  <button className="fortress-upgrade-button" disabled={isMax} onClick={() => onUpgrade(module.id)} type="button">
+                    {isMax ? "已满级" : `升级 ${module.name}`}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+
+          <div className="panel fortress-note-panel">
+            <div className="panel-head">
+              <span className="panel-path">工坊播报</span>
+              <span className="panel-note">永久强化</span>
+            </div>
+            <p className="panel-note">{fortressMessage}</p>
+          </div>
+
+          <button className="back-button" onClick={onBack} type="button">
+            返回主页
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProgressRoadScreen({ progressStats, roadmap, totalXp, onBack }) {
+  const currentNode =
+    roadmap.find((node) => totalXp >= node.totalXpToReach && totalXp < node.totalXpToNext) ||
+    roadmap[roadmap.length - 1];
+  const [selectedLevel, setSelectedLevel] = useState(currentNode?.level || 1);
+  const selectedNode = roadmap.find((node) => node.level === selectedLevel) || currentNode;
+
+  function getNodeReward(level, needXp) {
+    if (level % 4 === 0) return "解锁称号";
+    if (level % 3 === 0) return "成长加成";
+    return `+${needXp}XP`;
+  }
+
+  function getNodeRewardMeta(level, needXp) {
+    if (level % 4 === 0) return { icon: "👑", text: "解锁称号" };
+    if (level % 3 === 0) return { icon: "⬆️", text: "成长加成" };
+    return { icon: "⚡", text: `+${needXp}XP` };
+  }
+
+  function getNodeState(node) {
+    if (node.level === currentNode.level) return "current";
+    if (totalXp >= node.totalXpToNext) return "complete";
+    return "locked";
+  }
+
+  return (
+    <section className="screen active progression-screen">
       <div className="terminal-window">
         <header className="terminal-header">
           <span>成长路线</span>
           <span>Lv {progressStats.level}</span>
         </header>
 
-        <div className="terminal-body">
-          <div className="progress-road-head">
-            <div>
-              <h2>等级与经验规则</h2>
-              <p className="subtitle">每一局获得的积分会同时计入总经验。等级越高，下一等级需要的经验越多。</p>
+        <div className="terminal-body progression-body">
+          <section className="progression-layout">
+            <div className="progression-main">
+              <div className="progression-hero-card">
+                <div className="progression-hero-particles" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="progression-hero-top">
+                  <span className="label">当前等级</span>
+                  <span className="progression-state-badge current">进行中</span>
+                </div>
+                <div className="progression-hero-main">
+                  <div className="progression-hero-badge">
+                    <span>Lv</span>
+                    <strong>
+                      <AnimatedNumber value={progressStats.level} duration={700} />
+                    </strong>
+                  </div>
+                  <div className="progression-hero-copy">
+                    <h2>{progressStats.title}</h2>
+                    <p>
+                      总经验 <AnimatedNumber value={totalXp} duration={800} />
+                    </p>
+                    <p>下一等级还需 {Math.max(progressStats.nextXp - progressStats.currentXp, 0)} XP</p>
+                  </div>
+                </div>
+                <div className="progression-hero-track">
+                  <div className="progression-hero-fill" style={{ width: `${Math.max(progressStats.ratio * 100, 6)}%` }} />
+                </div>
+              </div>
+
+              <section className="progression-map">
+                <div className="progression-map-beam" aria-hidden="true" />
+                <div className="progression-grid">
+                  {roadmap.map((node, index) => {
+                    const state = getNodeState(node);
+                    const reward = getNodeRewardMeta(node.level, node.needXp);
+                    return (
+                      <div
+                        className={`progression-node-slot lane-${index % 2 === 0 ? "left" : "right"}`}
+                        key={node.level}
+                        style={{ gridRow: index + 1 }}
+                      >
+                        <button
+                          className={`progression-node ${state}${selectedNode.level === node.level ? " selected" : ""}`}
+                          onClick={() => setSelectedLevel(node.level)}
+                          type="button"
+                        >
+                          <span className="progression-node-core">
+                            {state === "complete" ? "✓" : state === "current" ? "◎" : "🔒"}
+                          </span>
+                          <span className="progression-node-copy">
+                            <strong>Lv {node.level}</strong>
+                            <em>
+                              <span className="progression-reward-icon">{reward.icon}</span>
+                              {reward.text}
+                            </em>
+                          </span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
             </div>
-            <div className="road-summary-card">
-              <span className="label">当前进度</span>
-              <strong>
-                Lv <AnimatedNumber value={progressStats.level} duration={700} />
-              </strong>
-              <p>{progressStats.title}</p>
-              <p>
-                总经验 <AnimatedNumber value={totalXp} duration={800} />
+
+            <aside className="progression-detail-float">
+              <div className="progression-detail-top">
+                <span className="label">节点详情</span>
+                <span className={`progression-state-badge ${getNodeState(selectedNode)}`}>
+                  {getNodeState(selectedNode) === "current"
+                    ? "当前"
+                    : getNodeState(selectedNode) === "complete"
+                      ? "已完成"
+                      : "未解锁"}
+                </span>
+              </div>
+              <strong>Lv {selectedNode.level}</strong>
+              <h3>{selectedNode.title}</h3>
+              <p className="progression-detail-reward">
+                <span className="progression-reward-icon">
+                  {getNodeRewardMeta(selectedNode.level, selectedNode.needXp).icon}
+                </span>
+                {getNodeReward(selectedNode.level, selectedNode.needXp)}
               </p>
-            </div>
-          </div>
-
-          <section className="road-rule-strip">
-            <article className="road-rule-card">
-              <span className="label">经验来源</span>
-              <strong>每局积分 = 等级经验</strong>
-              <p>不管输赢，只要本局结算拿到积分，就会写入成长路线。</p>
-            </article>
-            <article className="road-rule-card">
-              <span className="label">当前等级</span>
-              <strong>
-                {progressStats.currentXp} / {progressStats.nextXp}
-              </strong>
-              <p>这是你在当前等级内的进度，不是总经验。</p>
-            </article>
-            <article className="road-rule-card">
-              <span className="label">升级规律</span>
-              <strong>120 起步，每级 +70</strong>
-              <p>前期升级快，后期会更像荣誉之路，越往后越需要积累。</p>
-            </article>
-          </section>
-
-          <section className="roadmap-panel">
-            <div className="roadmap-track" aria-hidden="true" />
-            <div className="roadmap-list">
-              {roadmap.map((node) => {
-                const reached = totalXp >= node.totalXpToNext;
-                const isCurrent =
-                  totalXp >= node.totalXpToReach && totalXp < node.totalXpToNext;
-
-                return (
-                  <article
-                    className={`road-node${reached ? " reached" : ""}${isCurrent ? " current" : ""}`}
-                    key={node.level}
-                  >
-                    <div className="road-badge">
-                      <span>Lv</span>
-                      <strong>{node.level}</strong>
-                    </div>
-
-                    <div className="road-card">
-                      <div className="road-card-head">
-                        <div>
-                          <h3>{node.title}</h3>
-                          <p>
-                            升到 Lv {node.level + 1} 需要 {node.needXp} 经验
-                          </p>
-                        </div>
-                        <span className="road-state">
-                          {isCurrent ? "当前所处等级" : reached ? "已完成" : "未到达"}
-                        </span>
-                      </div>
-
-                      <div className="road-card-grid">
-                        <p>
-                          <span>本级区间</span>
-                          {node.totalXpToReach} - {node.totalXpToNext - 1} XP
-                        </p>
-                        <p>
-                          <span>累计到达下一等级</span>
-                          {node.totalXpToNext} XP
-                        </p>
-                        <p>
-                          <span>说明</span>
-                          {isCurrent
-                            ? `你还差 ${Math.max(node.totalXpToNext - totalXp, 0)} XP 升到下一级。`
-                            : reached
-                              ? "这一段成长路线你已经走完了。"
-                              : `到达这一等级前，累计还需要 ${Math.max(node.totalXpToReach - totalXp, 0)} XP。`}
-                        </p>
-                      </div>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
+              <div className="progression-detail-grid">
+                <p>
+                  <span>本级需求</span>
+                  <strong>{selectedNode.needXp} XP</strong>
+                </p>
+                <p>
+                  <span>累计到达</span>
+                  <strong>{selectedNode.totalXpToReach} XP</strong>
+                </p>
+                <p>
+                  <span>下一节点</span>
+                  <strong>{selectedNode.totalXpToNext} XP</strong>
+                </p>
+              </div>
+            </aside>
           </section>
 
           <button className="back-button" onClick={onBack} type="button">
@@ -2122,6 +3144,7 @@ function GameScreen({
   comboFlash,
   dangerLevel,
   enemies,
+  fortress,
   game,
   gameMessage,
   inventory,
@@ -2218,7 +3241,7 @@ function GameScreen({
               ))}
             </div>
 
-            {game.frozen && <div className="freeze-badge">冻结中 3 秒</div>}
+            {game.frozen && <div className="freeze-badge">冻结中 {fortress.freezeDurationLabel}</div>}
 
             {enemies.map((enemy) => (
               <div
