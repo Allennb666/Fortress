@@ -3,6 +3,7 @@ import { createEmptyInventory, difficultyConfig, shopItems } from "./gameData";
 
 const LEGACY_PROFILE_KEY = "word_fortress_profile_v1";
 const ACCOUNT_INDEX_KEY = "word_fortress_accounts_v1";
+const ACCOUNT_RECORD_KEY_PREFIX = "word_fortress_account_record_v1::";
 const SESSION_KEY = "word_fortress_session_v1";
 const PROFILE_KEY_PREFIX = "word_fortress_profile_user_v1::";
 const START_Y = 8;
@@ -38,6 +39,11 @@ const HOME_MODE_OPTIONS = [
   { id: "medium", label: "中等", desc: "词更难，速度适中", icon: "M" },
   { id: "hard", label: "困难", desc: "高分挑战，血量更少", icon: "H" },
   { id: "custom", label: "自定义", desc: "使用自己的词库", icon: "DIY" }
+];
+const DEFAULT_CUSTOM_WORD_ROWS = [
+  { id: "custom-word-1", en: "apple", zh: "苹果，水果" },
+  { id: "custom-word-2", en: "book", zh: "书，书本" },
+  { id: "custom-word-3", en: "travel", zh: "旅行，旅游" }
 ];
 const HOME_ITEM_ICONS = {
   skipPack: "杀",
@@ -338,26 +344,53 @@ function normalizeAccountKey(value) {
   return cleanAccountName(value).toLowerCase();
 }
 
-function loadAccounts() {
+function normalizeAccountRecord(account) {
+  const username = cleanAccountName(account?.username);
+  const id = normalizeAccountKey(account?.id || username);
+  if (!username || !id) return null;
+  return {
+    id,
+    username,
+    password: String(account?.password || ""),
+    createdAt: Number(account?.createdAt) || Date.now(),
+    lastLoginAt: Number(account?.lastLoginAt) || 0
+  };
+}
+
+function getAccountStorageKey(accountId) {
+  return `${ACCOUNT_RECORD_KEY_PREFIX}${normalizeAccountKey(accountId)}`;
+}
+
+function loadAccountRecords() {
   try {
-    const raw = localStorage.getItem(ACCOUNT_INDEX_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((account) => {
-        const username = cleanAccountName(account?.username);
-        const id = normalizeAccountKey(account?.id || username);
-        if (!username || !id) return null;
-        return {
-          id,
-          username,
-          password: String(account?.password || "")
-        };
+    return Object.keys(localStorage)
+      .filter((key) => key.startsWith(ACCOUNT_RECORD_KEY_PREFIX))
+      .map((key) => {
+        try {
+          return normalizeAccountRecord(JSON.parse(localStorage.getItem(key) || "null"));
+        } catch (_error) {
+          return null;
+        }
       })
       .filter(Boolean);
   } catch (_error) {
     return [];
+  }
+}
+
+function loadAccounts() {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_INDEX_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    const indexedAccounts = Array.isArray(parsed) ? parsed.map(normalizeAccountRecord).filter(Boolean) : [];
+    const recordAccounts = loadAccountRecords();
+    const merged = new Map();
+    [...indexedAccounts, ...recordAccounts].forEach((account) => {
+      merged.set(account.id, { ...(merged.get(account.id) || {}), ...account });
+    });
+    return Array.from(merged.values()).sort((a, b) => a.username.localeCompare(b.username, "zh-CN"));
+  } catch (_error) {
+    return loadAccountRecords();
   }
 }
 
@@ -412,7 +445,37 @@ function loadProfileForAccount(accountId) {
 }
 
 function saveAccounts(accounts) {
-  localStorage.setItem(ACCOUNT_INDEX_KEY, JSON.stringify(accounts));
+  const normalizedAccounts = accounts.map(normalizeAccountRecord).filter(Boolean);
+  localStorage.setItem(ACCOUNT_INDEX_KEY, JSON.stringify(normalizedAccounts));
+  normalizedAccounts.forEach((account) => {
+    localStorage.setItem(getAccountStorageKey(account.id), JSON.stringify(account));
+  });
+}
+
+function saveProfileForAccount(accountId, profile) {
+  localStorage.setItem(getProfileStorageKey(accountId), JSON.stringify(profile));
+}
+
+function buildLeaderboardEntries(accounts) {
+  return accounts
+    .map((account) => {
+      const playerProfile = loadProfileForAccount(account.id);
+      return {
+        id: account.id,
+        username: account.username,
+        wallet: playerProfile.wallet || 0,
+        lifetimeScore: playerProfile.lifetimeScore || 0,
+        bestCombo: playerProfile.bestCombo || 0,
+        level: buildPlayerProgress(playerProfile.lifetimeScore || 0).level,
+        title: buildPlayerProgress(playerProfile.lifetimeScore || 0).title
+      };
+    })
+    .sort((a, b) => {
+      if (b.lifetimeScore !== a.lifetimeScore) return b.lifetimeScore - a.lifetimeScore;
+      if (b.bestCombo !== a.bestCombo) return b.bestCombo - a.bestCombo;
+      if (b.wallet !== a.wallet) return b.wallet - a.wallet;
+      return a.username.localeCompare(b.username, "zh-CN");
+    });
 }
 
 function getXpGoal(level) {
@@ -425,6 +488,22 @@ function getRankTitle(level) {
   if (level >= 6) return "词义猎人";
   if (level >= 3) return "前线守卫";
   return "新手冒险者";
+}
+
+function getRankEffect(level) {
+  if (level >= 12) return "结算总经验额外 +20%，高连击更容易拉开差距。";
+  if (level >= 9) return "错题练习收益额外 +15%，更适合集中刷分。";
+  if (level >= 6) return "战斗结算额外 +10% 经验，成长速度更快。";
+  if (level >= 3) return "基地守成更稳，日常推进更轻松。";
+  return "基础成长阶段，先稳定积累积分和经验。";
+}
+
+function getNextUpgradeReward(level) {
+  if (level + 1 >= 12) return "解锁传说称号与最终成长加成";
+  if (level + 1 >= 9) return "解锁秘境段位称号与更高经验收益";
+  if (level + 1 >= 6) return "解锁猎人段位称号与经验加成";
+  if (level + 1 >= 3) return "解锁前线守卫称号";
+  return "继续提升基础等级与 XP 上限";
 }
 
 function buildPlayerProgress(totalXp) {
@@ -443,7 +522,10 @@ function buildPlayerProgress(totalXp) {
     currentXp: xp,
     nextXp: goal,
     ratio: goal ? xp / goal : 0,
-    title: getRankTitle(level)
+    title: getRankTitle(level),
+    xpLeft: Math.max(goal - xp, 0),
+    effect: getRankEffect(level),
+    nextReward: getNextUpgradeReward(level)
   };
 }
 
@@ -607,6 +689,30 @@ function parseCustomWords(raw) {
     .filter(Boolean);
 }
 
+function createCustomWordRow(id) {
+  return {
+    id: `custom-word-${id}`,
+    en: "",
+    zh: ""
+  };
+}
+
+function serializeCustomWordRows(rows) {
+  return rows
+    .map((row) => {
+      const en = row.en.trim();
+      const translations = row.zh
+        .split(/[|｜、,，/]/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+      if (!en || translations.length === 0) return "";
+
+      return [en, translations.join("|")].join(":");
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 function buildInventoryText(profile) {
   const tags = shopItems
     .filter((item) => (profile.inventory[item.id] || 0) > 0)
@@ -702,7 +808,7 @@ export default function App() {
   const [answer, setAnswer] = useState("");
   const [selectedMode, setSelectedMode] = useState("easy");
   const [showCustom, setShowCustom] = useState(false);
-  const [customWordsText, setCustomWordsText] = useState("apple:苹果|水果\nbook:书|书本\ntravel:旅行|旅游");
+  const [customWordRows, setCustomWordRows] = useState(DEFAULT_CUSTOM_WORD_ROWS);
   const [customSpeed, setCustomSpeed] = useState(85);
   const [homeNote, setHomeNote] = useState("准备就绪。选择一个关卡开始，或先去商店购买道具。");
   const [authMessage, setAuthMessage] = useState("注册账号后，积分、道具和错题本会按账号分别保存。");
@@ -731,6 +837,7 @@ export default function App() {
   const rafRef = useRef(null);
   const lastTsRef = useRef(0);
   const enemyIdRef = useRef(0);
+  const customRowIdRef = useRef(DEFAULT_CUSTOM_WORD_ROWS.length);
 
   const profileRef = useRef(profile);
   const gameRef = useRef(game);
@@ -744,8 +851,10 @@ export default function App() {
     () => accounts.find((account) => account.id === authUserId) || null,
     [accounts, authUserId]
   );
+  const leaderboardEntries = useMemo(() => buildLeaderboardEntries(accounts), [accounts, profile, authUserId]);
   const legacyProfileAvailable = useMemo(() => hasLegacyProfileData(), []);
   const fortressEffects = useMemo(() => getFortressEffects(profile), [profile]);
+  const customWordsText = useMemo(() => serializeCustomWordRows(customWordRows), [customWordRows]);
 
   useEffect(() => {
     profileRef.current = profile;
@@ -762,7 +871,7 @@ export default function App() {
   useEffect(() => {
     try {
       if (!authUserId) return;
-      localStorage.setItem(getProfileStorageKey(authUserId), JSON.stringify(profile));
+      saveProfileForAccount(authUserId, profile);
     } catch (_error) {
       setHomeNote("浏览器暂时无法写入本地存储，错题本可能无法保存。");
     }
@@ -1571,15 +1680,21 @@ export default function App() {
       return false;
     }
 
+    const now = Date.now();
     const nextAccount = {
       id: accountId,
       username: cleanUsername,
-      password: cleanPassword
+      password: cleanPassword,
+      createdAt: now,
+      lastLoginAt: now
     };
     const shouldImportLegacy = accounts.length === 0 && legacyProfileAvailable;
     const importedProfile = shouldImportLegacy ? loadLegacyProfile() : createEmptyProfile();
+    const nextAccounts = [...accounts, nextAccount];
 
-    setAccounts((prev) => [...prev, nextAccount]);
+    setAccounts(nextAccounts);
+    saveAccounts(nextAccounts);
+    saveProfileForAccount(accountId, importedProfile);
     saveSession(accountId);
     setAuthUserId(accountId);
     profileRef.current = importedProfile;
@@ -1605,6 +1720,16 @@ export default function App() {
     }
 
     const nextProfile = loadProfileForAccount(account.id);
+    const nextAccounts = accounts.map((entry) =>
+      entry.id === account.id
+        ? {
+            ...entry,
+            lastLoginAt: Date.now()
+          }
+        : entry
+    );
+    setAccounts(nextAccounts);
+    saveAccounts(nextAccounts);
     saveSession(account.id);
     setAuthUserId(account.id);
     profileRef.current = nextProfile;
@@ -1629,6 +1754,10 @@ export default function App() {
     resetBattleSession();
   }
 
+  function jumpToLoginAccount(username) {
+    setAuthMessage(`已识别本机账号 ${cleanAccountName(username)}，输入密码即可登录。`);
+  }
+
   function handleModeSelect(mode) {
     setSelectedMode(mode);
     if (mode === "custom") {
@@ -1639,6 +1768,19 @@ export default function App() {
 
     setShowCustom(false);
     setHomeNote(`已选中${getModeDisplayName(mode)}。确认后点击开始挑战。`);
+  }
+
+  function updateCustomWordRow(id, field, value) {
+    setCustomWordRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
+  }
+
+  function addCustomWordRow() {
+    customRowIdRef.current += 1;
+    setCustomWordRows((prev) => [...prev, createCustomWordRow(customRowIdRef.current)]);
+  }
+
+  function removeCustomWordRow(id) {
+    setCustomWordRows((prev) => (prev.length <= 3 ? prev : prev.filter((row) => row.id !== id)));
   }
 
   function handleHomeStart() {
@@ -1653,7 +1795,7 @@ export default function App() {
   function handleCustomStart() {
     const words = parseCustomWords(customWordsText);
     if (words.length < 3) {
-      setHomeNote("自定义模式至少需要 3 个单词，格式为 english:中文（可选别名 english:中文|别名1|别名2）。");
+      setHomeNote("自定义模式至少需要 3 个完整单词，请填写英文和中文。多个中文翻译可用逗号分开。");
       return;
     }
 
@@ -1919,11 +2061,13 @@ export default function App() {
       <InteractiveBackground />
       <div className="scanlines" aria-hidden="true" />
 
-      <main className="shell">
+      <main className={`shell${authUser && screen === "home" ? " shell-home" : ""}`}>
         {!authUser && (
           <AuthScreen
+            accounts={accounts}
             authMessage={authMessage}
             hasLegacyProfile={legacyProfileAvailable && accounts.length === 0}
+            onQuickPick={jumpToLoginAccount}
             onLogin={loginAccount}
             onRegister={registerAccount}
           />
@@ -1937,12 +2081,14 @@ export default function App() {
             homeNote={homeNote}
             fortress={fortressEffects}
             showCustom={showCustom}
-            customWordsText={customWordsText}
+            customWordRows={customWordRows}
             customSpeed={customSpeed}
             mistakeCount={profile.mistakes.length}
             progressStats={progressStats}
             selectedMode={selectedMode}
-            onWordsChange={setCustomWordsText}
+            onCustomWordChange={updateCustomWordRow}
+            onAddCustomWord={addCustomWordRow}
+            onRemoveCustomWord={removeCustomWordRow}
             onSpeedChange={setCustomSpeed}
             onToggleMode={handleModeSelect}
             onStartSelected={handleHomeStart}
@@ -1952,10 +2098,19 @@ export default function App() {
             onOpenProgress={() => setScreen("progress")}
             onOpenFortress={() => setScreen("fortress")}
             onLogout={logoutAccount}
+            onOpenLeaderboard={() => setScreen("leaderboard")}
             onOpenShop={() => {
               setShopMessage({ text: "被动道具会在下一局自动加载，主动道具可在战斗中点击使用。", type: "ok" });
               setScreen("shop");
             }}
+          />
+        )}
+
+        {authUser && screen === "leaderboard" && (
+          <LeaderboardScreen
+            currentUserId={authUser.id}
+            entries={leaderboardEntries}
+            onBack={() => setScreen("home")}
           />
         )}
 
@@ -2283,7 +2438,7 @@ function InteractiveBackground() {
   return <canvas className="interactive-bg" ref={canvasRef} aria-hidden="true" />;
 }
 
-function AuthScreen({ authMessage, hasLegacyProfile, onLogin, onRegister }) {
+function AuthScreen({ accounts, authMessage, hasLegacyProfile, onLogin, onQuickPick, onRegister }) {
   const [mode, setMode] = useState("login");
   const [loginForm, setLoginForm] = useState({ username: "", password: "" });
   const [registerForm, setRegisterForm] = useState({
@@ -2300,6 +2455,12 @@ function AuthScreen({ authMessage, hasLegacyProfile, onLogin, onRegister }) {
   function submitRegister(event) {
     event.preventDefault();
     onRegister(registerForm);
+  }
+
+  function pickAccount(username) {
+    setMode("login");
+    setLoginForm({ username, password: "" });
+    onQuickPick(username);
   }
 
   return (
@@ -2456,6 +2617,19 @@ function AuthScreen({ authMessage, hasLegacyProfile, onLogin, onRegister }) {
                 <span className="label">状态</span>
                 <p>{authMessage}</p>
               </div>
+
+              {accounts.length > 0 && (
+                <div className="auth-saved-box">
+                  <span className="label">本机账号</span>
+                  <div className="auth-saved-list">
+                    {accounts.map((account) => (
+                      <button key={account.id} onClick={() => pickAccount(account.username)} type="button">
+                        {account.username}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </section>
           </div>
         </div>
@@ -2471,12 +2645,14 @@ function HomeScreen({
   homeNote,
   fortress,
   showCustom,
-  customWordsText,
+  customWordRows,
   customSpeed,
   mistakeCount,
   progressStats,
   selectedMode,
-  onWordsChange,
+  onCustomWordChange,
+  onAddCustomWord,
+  onRemoveCustomWord,
   onSpeedChange,
   onToggleMode,
   onStartSelected,
@@ -2486,6 +2662,7 @@ function HomeScreen({
   onOpenProgress,
   onOpenFortress,
   onLogout,
+  onOpenLeaderboard,
   onOpenShop
 }) {
   const selectedModeMeta = HOME_MODE_OPTIONS.find((mode) => mode.id === selectedMode) || HOME_MODE_OPTIONS[0];
@@ -2505,6 +2682,21 @@ function HomeScreen({
   const fortressSummary = `城墙 Lv ${fortress.levels.wall} · 冰库 Lv ${fortress.levels.cryo} · 指挥台 Lv ${fortress.levels.command}`;
   const selectedAvatar = getPlayerAvatar(profile);
   const rankIcon = getRankIcon(progressStats.level);
+  const heroBriefItems = [
+    { label: "基地容错", value: `生命 +${fortress.wallHpBonus}`, tone: "gold" },
+    { label: "冻结时长", value: fortress.freezeDurationLabel, tone: "cyan" },
+    {
+      label: "连击收益",
+      value: `+${Math.round((fortress.comboBonusMultiplier - 1) * 100)}%`,
+      tone: "blue"
+    }
+  ];
+  const heroBriefNote =
+    mistakeCount > 0
+      ? `待复习 ${mistakeCount} 个单词，建议先处理错题再冲高分。`
+      : totalItems > 0
+        ? `库存有 ${totalItems} 件补给，适合直接开局冲分。`
+        : `${selectedModeMeta.desc}，保持节奏直接开始一局。`;
 
   return (
     <section className="screen active home-screen">
@@ -2521,237 +2713,308 @@ function HomeScreen({
 
         <div className="terminal-body">
           <div className="menu-layout">
-            <section className="menu-hero">
+            <section className="menu-topbar">
               <div className="hero-copy">
                 <span className="eyebrow">词义防线</span>
                 <h1>单词堡垒</h1>
                 <p className="subtitle">选一个关卡，输入中文翻译，守住基地。</p>
+                <div className="hero-brief-panel">
+                  <div className="hero-brief-head">
+                    <span className="label">堡垒增益总览</span>
+                    <strong>{fortressSummary}</strong>
+                  </div>
+                  <div className="hero-brief-grid">
+                    {heroBriefItems.map((item) => (
+                      <div className={`hero-brief-card ${item.tone}`} key={item.label}>
+                        <span>{item.label}</span>
+                        <strong>{item.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="hero-brief-note">{heroBriefNote}</p>
+                </div>
+              </div>
+
+              <div className="menu-topbar-side">
+                <div className="hero-player-panel">
+                  <div className="hero-player-top">
+                    <div className="hero-avatar-main">
+                      <span className="player-avatar-glyph">{selectedAvatar.glyph}</span>
+                    </div>
+
+                    <div className="hero-player-meta">
+                      <div className="hero-player-name-row">
+                        <strong>{playerName}</strong>
+                        <span className="rank-chip">
+                          <span className="rank-icon">{rankIcon}</span>
+                          <span className="rank-chip-level">{progressStats.level}</span>
+                        </span>
+                      </div>
+                      <p>{progressStats.title}</p>
+                    </div>
+                  </div>
+
+                  <div className="hero-player-stats">
+                    <div className="hero-player-stat-card spotlight">
+                      <span>积分</span>
+                      <strong>
+                        <AnimatedNumber value={profile.wallet} />
+                      </strong>
+                    </div>
+                    <div className="hero-player-stat-card">
+                      <span>最高连击</span>
+                      <strong>{profile.bestCombo || 0} 连</strong>
+                    </div>
+                  </div>
+
+                  <div className="hero-player-actions">
+                    <button className="hero-leaderboard-button" onClick={onOpenLeaderboard} type="button">
+                      查看总榜
+                    </button>
+                  </div>
+                </div>
               </div>
             </section>
 
-            <section className="menu-core">
+            <section className="menu-core menu-core-onepage">
               <span className="ambient-orb orb-a" aria-hidden="true" />
               <span className="ambient-orb orb-b" aria-hidden="true" />
               <span className="ambient-orb orb-c" aria-hidden="true" />
 
-              <div className="core-topline">
+              <div className="home-main-grid">
                 <section className="xp-panel xp-hero-panel">
-                  <div className="xp-topline">
-                    <div className="xp-chip">
-                      <span className="label">等级</span>
-                      <strong>
-                        Lv <AnimatedNumber value={progressStats.level} duration={700} />
-                      </strong>
+                  <div className="xp-layout">
+                    <div className="xp-main">
+                      <div className="xp-topline">
+                        <div className="xp-chip">
+                          <span className="label">等级</span>
+                          <strong>
+                            Lv <AnimatedNumber value={progressStats.level} duration={700} />
+                          </strong>
+                        </div>
+                        <div className="xp-meta">
+                          <span>{progressStats.title}</span>
+                          <span>
+                            XP <AnimatedNumber value={progressStats.currentXp} duration={700} /> /{" "}
+                            <AnimatedNumber value={progressStats.nextXp} duration={700} />
+                          </span>
+                        </div>
+                      </div>
+                      <div className="xp-track">
+                        <div className="xp-fill" style={{ width: `${Math.max(progressStats.ratio * 100, 6)}%` }} />
+                      </div>
+                      <div className="xp-actions">
+                        <button className="xp-detail-button" onClick={onOpenProgress} type="button">
+                          查看成长路线
+                        </button>
+                      </div>
                     </div>
-                    <div className="xp-meta">
-                      <span>{progressStats.title}</span>
-                      <span>
-                        XP <AnimatedNumber value={progressStats.currentXp} duration={700} /> /{" "}
-                        <AnimatedNumber value={progressStats.nextXp} duration={700} />
-                      </span>
+
+                    <div className="xp-side-info">
+                      <div className="xp-info-card">
+                        <span>距离升级</span>
+                        <strong>
+                          <AnimatedNumber value={progressStats.xpLeft} duration={700} /> XP
+                        </strong>
+                      </div>
+                      <div className="xp-info-card">
+                        <span>升级奖励</span>
+                        <strong>{progressStats.nextReward}</strong>
+                      </div>
+                      <div className="xp-info-card">
+                        <span>当前称号效果</span>
+                        <strong>{progressStats.effect}</strong>
+                      </div>
                     </div>
-                  </div>
-                  <div className="xp-track">
-                    <div className="xp-fill" style={{ width: `${Math.max(progressStats.ratio * 100, 6)}%` }} />
-                  </div>
-                  <div className="xp-actions">
-                    <button className="xp-detail-button" onClick={onOpenProgress} type="button">
-                      查看成长路线
-                    </button>
                   </div>
                 </section>
 
-                <div className="start-cluster">
-                  <div className="hero-player-panel">
-                    <div className="hero-player-top">
-                      <div className="hero-avatar-main">
-                        <span className="player-avatar-glyph">{selectedAvatar.glyph}</span>
-                      </div>
-
-                      <div className="hero-player-meta">
-                        <div className="hero-player-name-row">
-                          <strong>{playerName}</strong>
-                          <span className="rank-chip">
-                            <span className="rank-icon">{rankIcon}</span>
-                            Lv {progressStats.level}
-                          </span>
-                        </div>
-                        <p>{progressStats.title}</p>
-                      </div>
-                    </div>
-
-                    <div className="hero-player-stats">
-                      <div className="hero-player-stat-card spotlight">
-                        <span>积分</span>
-                        <strong>
-                          <AnimatedNumber value={profile.wallet} />
-                        </strong>
-                      </div>
-                      <div className="hero-player-stat-card">
-                        <span>最高连击</span>
-                        <strong>{profile.bestCombo || 0} 连</strong>
-                      </div>
-                    </div>
-                  </div>
-
-                  <span className="selected-mode-chip">当前关卡：{selectedModeMeta.label}</span>
-                  <button className="start-button" onClick={onStartSelected} type="button">
-                    开始挑战
-                  </button>
-                  <p className="start-hint">
-                    {selectedMode === "custom" ? "先确认词库和速度，再进入自定义战斗。" : "确认模式后立即开始一局。"}
-                  </p>
-                </div>
-              </div>
-
-              <section className="mode-select-stage">
-                <div className="mode-grid">
-                  {HOME_MODE_OPTIONS.map((mode) => (
-                    <button
-                      className={`mode-card${selectedMode === mode.id ? " selected" : ""}`}
-                      key={mode.id}
-                      onClick={() => onToggleMode(mode.id)}
-                      type="button"
-                    >
-                      <span className="mode-icon">{mode.icon}</span>
-                      <span className="mode-name">{mode.label}</span>
-                      <span className="mode-desc">{mode.desc}</span>
+                <aside className="home-side-column">
+                  <div className="start-cluster">
+                    <span className="selected-mode-chip">当前关卡：{selectedModeMeta.label}</span>
+                    <button className="start-button" onClick={onStartSelected} type="button">
+                      开始游戏
                     </button>
-                  ))}
-                </div>
-              </section>
-
-              {showCustom && (
-                <div className="custom-panel">
-                  <label className="label" htmlFor="custom-words">
-                    自定义词库
-                  </label>
-                  <textarea
-                    id="custom-words"
-                    rows="7"
-                    value={customWordsText}
-                    onChange={(event) => onWordsChange(event.target.value)}
-                  />
-
-                  <label className="label" htmlFor="custom-speed">
-                    怪物速度
-                  </label>
-                  <input
-                    id="custom-speed"
-                    max="160"
-                    min="40"
-                    type="range"
-                    value={customSpeed}
-                    onChange={(event) => onSpeedChange(Number(event.target.value))}
-                  />
-                  <div className="speed-line">当前速度：{customSpeed} 像素/秒</div>
-
-                  <button className="custom-start-button" onClick={onCustomStart} type="button">
-                    立即开始自定义关卡
-                  </button>
-                </div>
-              )}
-            </section>
-
-            <section className="support-strip">
-              <ParallaxSupportCard className="fortress-summary-card reward-card">
-                <div className="support-head">
-                  <span className="support-icon fortress-icon">堡</span>
-                  <div>
-                    <span className="label">堡垒工坊</span>
-                    <p className="support-caption">长期强化会直接改变每一局的容错和收益。</p>
-                  </div>
-                </div>
-                <div className="support-value-row">
-                  <strong className="support-value reward-value">
-                    Lv {fortress.levels.wall + fortress.levels.cryo + fortress.levels.command}
-                  </strong>
-                  <span className="support-badge gold">总强化等级</span>
-                </div>
-                <div className="support-meter support-meter-gold" aria-hidden="true">
-                  <span
-                    style={{
-                      width: `${Math.min(
-                        100,
-                        ((fortress.levels.wall + fortress.levels.cryo + fortress.levels.command) / 9) * 100
-                      )}%`
-                    }}
-                  />
-                </div>
-                <p className="support-note">
-                  {fortressSummary}。当前冻结 {fortress.freezeDurationLabel}，连击收益 +{Math.round((fortress.comboBonusMultiplier - 1) * 100)}%。
-                </p>
-                <div className="support-actions">
-                  <button className="support-button fortress-button" onClick={onOpenFortress} type="button">
-                    升级堡垒
-                  </button>
-                </div>
-              </ParallaxSupportCard>
-
-              <ParallaxSupportCard className="gear-card">
-                <div className="support-head">
-                  <span className="support-icon gear-icon">装</span>
-                  <div>
-                    <span className="label">装备栏</span>
-                    <p className="support-caption">{totalItems > 0 ? `已拥有 ${totalItems} 件补给` : "补给槽位待填充"}</p>
-                  </div>
-                </div>
-                {equippedItems.length > 0 ? (
-                  <div className="gear-slot-grid">
-                    {equippedItems.map((item) => (
-                      <div className="gear-slot filled" key={item.id}>
-                        <span className="gear-slot-icon">{item.icon}</span>
-                        <div className="gear-slot-copy">
-                          <strong>{item.name}</strong>
-                          <span>持有 x{item.count}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="gear-empty-state">
-                    <span className="gear-slot-icon">+</span>
-                    <div className="gear-slot-copy">
-                      <strong>空槽位</strong>
-                      <span>去商店补充装备后，这里会显示你当前持有的补给。</span>
-                    </div>
-                  </div>
-                )}
-                <p className="support-note">这里只显示补给概览，详细效果可在商店查看。{inventoryText}</p>
-                <div className="support-actions">
-                  <button className="support-button shop-button" onClick={onOpenShop} type="button">
-                    打开商店
-                  </button>
-                </div>
-              </ParallaxSupportCard>
-
-              <ParallaxSupportCard className={`revenge-card revenge-card-${mistakeTone}`}>
-                <div className="support-head">
-                  <span className="support-icon revenge-icon">复</span>
-                  <div>
-                    <span className="label">{mistakeTitle}</span>
-                    <p className="support-caption">
-                      {mistakeCount > 0 ? "这些词还在等你拿回胜场。" : "当前错题本已经清空。"}
+                    <p className="start-hint">
+                      {selectedMode === "custom" ? "先确认词库和速度，再进入自定义战斗。" : "确认模式后立即开始一局。"}
                     </p>
                   </div>
-                </div>
-                <div className="support-value-row">
-                  <strong className="support-value revenge-value">
-                    <AnimatedNumber value={mistakeCount} />
-                  </strong>
-                  <span className={`support-badge ${mistakeCount > 0 ? "orange" : "calm"}`}>
-                    {mistakeCount > 0 ? "需要处理" : "状态良好"}
-                  </span>
-                </div>
-                <div className="support-actions">
-                  <button className="support-button revenge-button" onClick={onOpenMistakes} type="button">
-                    查看
-                  </button>
-                  <button className="support-button revenge-button" onClick={onStartMistakePractice} type="button">
-                    立即复习
-                  </button>
-                </div>
-              </ParallaxSupportCard>
+
+                  {showCustom && (
+                    <div className="custom-panel compact-custom-panel">
+                      <div className="custom-panel-head">
+                        <span className="label">自定义关卡</span>
+                        <strong>DIY</strong>
+                      </div>
+                      <div className="custom-word-title">
+                        <span className="label">词库录入</span>
+                        <strong>{customWordRows.length} 词</strong>
+                      </div>
+                      <div className="custom-word-builder" aria-label="自定义词库">
+                        {customWordRows.map((row, index) => (
+                          <div className="custom-word-row" key={row.id}>
+                            <span className="custom-row-index">{String(index + 1).padStart(2, "0")}</span>
+                            <input
+                              aria-label={`第 ${index + 1} 个英文单词`}
+                              placeholder="英文单词"
+                              type="text"
+                              value={row.en}
+                              onChange={(event) => onCustomWordChange(row.id, "en", event.target.value)}
+                            />
+                            <input
+                              aria-label={`第 ${index + 1} 个中文释义`}
+                              placeholder="中文翻译，用逗号分开"
+                              type="text"
+                              value={row.zh}
+                              onChange={(event) => onCustomWordChange(row.id, "zh", event.target.value)}
+                            />
+                            <button
+                              aria-label={`删除第 ${index + 1} 个单词`}
+                              className="custom-row-remove"
+                              disabled={customWordRows.length <= 3}
+                              onClick={() => onRemoveCustomWord(row.id)}
+                              type="button"
+                            >
+                              -
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="custom-word-actions">
+                        <button className="custom-add-row" onClick={onAddCustomWord} type="button">
+                          + 添加单词
+                        </button>
+                        <p className="custom-format-hint">中文可写多个翻译，用中文或英文逗号分开。</p>
+                      </div>
+
+                      <label className="label" htmlFor="custom-speed">
+                        怪物速度
+                      </label>
+                      <input
+                        id="custom-speed"
+                        max="160"
+                        min="40"
+                        type="range"
+                        value={customSpeed}
+                        onChange={(event) => onSpeedChange(Number(event.target.value))}
+                      />
+                      <div className="speed-scale" aria-hidden="true">
+                        <span>慢</span>
+                        <span>标准</span>
+                        <span>快</span>
+                      </div>
+                      <div className="speed-line">当前速度：{customSpeed} 像素/秒</div>
+
+                      <button className="custom-start-button" onClick={onCustomStart} type="button">
+                        立即开始自定义关卡
+                      </button>
+                    </div>
+                  )}
+                </aside>
+
+                <section className="mode-select-stage">
+                  <div className="mode-grid">
+                    {HOME_MODE_OPTIONS.map((mode) => (
+                      <button
+                        className={`mode-card${selectedMode === mode.id ? " selected" : ""}`}
+                        key={mode.id}
+                        onClick={() => onToggleMode(mode.id)}
+                        type="button"
+                      >
+                        <span className="mode-icon">{mode.icon}</span>
+                        <span className="mode-name">{mode.label}</span>
+                        <span className="mode-desc">{mode.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              </div>
+
+              <section className="support-strip">
+                <ParallaxSupportCard className="fortress-summary-card reward-card">
+                  <div className="support-head">
+                    <span className="support-icon fortress-icon">堡</span>
+                    <div>
+                      <span className="label">堡垒工坊</span>
+                      <p className="support-caption">强化基地核心模块。</p>
+                    </div>
+                  </div>
+                  <div className="support-value-row">
+                    <strong className="support-value reward-value">
+                      Lv {fortress.levels.wall + fortress.levels.cryo + fortress.levels.command}
+                    </strong>
+                    <span className="support-badge gold">总强化等级</span>
+                  </div>
+                  <p className="support-note">城墙、冰库、指挥台详情在工坊查看。</p>
+                  <div className="support-actions">
+                    <button className="support-button fortress-button" onClick={onOpenFortress} type="button">
+                      升级堡垒
+                    </button>
+                  </div>
+                </ParallaxSupportCard>
+
+                <ParallaxSupportCard className="gear-card">
+                  <div className="support-head">
+                    <span className="support-icon gear-icon">装</span>
+                    <div>
+                      <span className="label">装备栏</span>
+                      <p className="support-caption">{totalItems > 0 ? `库存 ${totalItems} 件补给` : "暂无补给"}</p>
+                    </div>
+                  </div>
+                  {equippedItems.length > 0 ? (
+                    <div className="gear-token-row">
+                      {equippedItems.slice(0, 3).map((item) => (
+                        <div className="gear-token filled" key={item.id} title={`${item.name} x${item.count}`}>
+                          <span className="gear-slot-icon">{item.icon}</span>
+                          <strong>x{item.count}</strong>
+                        </div>
+                      ))}
+                      {equippedItems.length > 3 && <span className="gear-more-token">+{equippedItems.length - 3}</span>}
+                    </div>
+                  ) : (
+                    <div className="gear-empty-state compact-empty-state">
+                      <span className="gear-slot-icon">+</span>
+                      <div className="gear-slot-copy">
+                        <strong>空槽位</strong>
+                      </div>
+                    </div>
+                  )}
+                  <p className="support-note">补给效果与购买在商店查看。</p>
+                  <div className="support-actions">
+                    <button className="support-button shop-button" onClick={onOpenShop} type="button">
+                      打开商店
+                    </button>
+                  </div>
+                </ParallaxSupportCard>
+
+                <ParallaxSupportCard className={`revenge-card revenge-card-${mistakeTone}`}>
+                  <div className="support-head">
+                    <span className="support-icon revenge-icon">复</span>
+                    <div>
+                      <span className="label">{mistakeTitle}</span>
+                      <p className="support-caption">
+                        {mistakeCount > 0 ? "这些词还在等你拿回胜场。" : "当前错题本已经清空。"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="support-value-row compact-row">
+                    <strong className="support-value revenge-value">
+                      <AnimatedNumber value={mistakeCount} />
+                    </strong>
+                    <span className={`support-badge ${mistakeCount > 0 ? "orange" : "calm"}`}>
+                      {mistakeCount > 0 ? "需要处理" : "状态良好"}
+                    </span>
+                  </div>
+                  <div className="support-actions">
+                    <button className="support-button revenge-button" onClick={onOpenMistakes} type="button">
+                      查看
+                    </button>
+                    <button className="support-button revenge-button" onClick={onStartMistakePractice} type="button">
+                      立即复习
+                    </button>
+                  </div>
+                </ParallaxSupportCard>
+              </section>
             </section>
           </div>
         </div>
@@ -2774,11 +3037,69 @@ function formatWordDetail(value) {
   return value || "暂无";
 }
 
-function FortressScreen({ wallet, fortress, fortressMessage, onUpgrade, onBack }) {
+function LeaderboardScreen({ currentUserId, entries, onBack }) {
   return (
     <section className="screen active">
       <div className="terminal-window">
         <header className="terminal-header">
+          <span>玩家总榜</span>
+          <span>{entries.length} 名玩家</span>
+        </header>
+
+        <div className="terminal-body">
+          <div className="leaderboard-head">
+            <div>
+              <h2>堡垒排行榜</h2>
+              <p className="subtitle">按总经验优先排序，其次比较最高连击和当前积分。</p>
+            </div>
+          </div>
+
+          <div className="leaderboard-list">
+            {entries.map((entry, index) => (
+              <article className={`leaderboard-row${entry.id === currentUserId ? " current" : ""}`} key={entry.id}>
+                <div className="leaderboard-rank">
+                  <span>#{index + 1}</span>
+                </div>
+                <div className="leaderboard-main">
+                  <strong>{entry.username}</strong>
+                  <span>{entry.title}</span>
+                </div>
+                <div className="leaderboard-stats">
+                  <p>
+                    <span>等级</span>
+                    <strong>{entry.level}</strong>
+                  </p>
+                  <p>
+                    <span>总经验</span>
+                    <strong>{entry.lifetimeScore}</strong>
+                  </p>
+                  <p>
+                    <span>最高连击</span>
+                    <strong>{entry.bestCombo} 连</strong>
+                  </p>
+                  <p>
+                    <span>积分</span>
+                    <strong>{entry.wallet}</strong>
+                  </p>
+                </div>
+              </article>
+            ))}
+          </div>
+
+          <button className="back-button" onClick={onBack} type="button">
+            返回主页
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FortressScreen({ wallet, fortress, fortressMessage, onUpgrade, onBack }) {
+  return (
+    <section className="screen active system-screen fortress-screen">
+      <div className="terminal-window game-menu-shell system-shell">
+        <header className="terminal-header menu-header">
           <span>堡垒工坊</span>
           <span>强化基地</span>
         </header>
@@ -3007,9 +3328,9 @@ function MistakeBookScreen({ mistakes, onBack, onMarkMastered, onStartPractice }
   const normalizedMistakes = normalizeMistakeBook(mistakes);
 
   return (
-    <section className="screen active">
-      <div className="terminal-window">
-        <header className="terminal-header">
+    <section className="screen active system-screen mistake-screen">
+      <div className="terminal-window game-menu-shell system-shell">
+        <header className="terminal-header menu-header">
           <span>错题本</span>
           <span>{normalizedMistakes.length} 个待复习单词</span>
         </header>
@@ -3037,15 +3358,11 @@ function MistakeBookScreen({ mistakes, onBack, onMarkMastered, onStartPractice }
                   <summary className="mistake-summary">
                     <span className="mistake-word">
                       <h3>{entry.en}</h3>
-                      <strong>展开查看意思 / 词性 / 造句</strong>
+                      <strong>{entry.zh}</strong>
                     </span>
-                    <span className="mistake-meta-grid">
-                      <span>错误 {entry.missedCount} 次</span>
-                      <span>
-                        连续答对 {entry.correctStreak}/{MASTERED_STREAK}
-                      </span>
-                      <span>来源：{entry.source}</span>
-                      <span>最近出错：{formatMistakeDate(entry.lastMissedAt)}</span>
+                    <span className="mistake-progress-strip">
+                      <span className="mistake-count-chip">错误 {entry.missedCount} 次</span>
+                      <span className="mistake-streak-chip">掌握 {entry.correctStreak}/{MASTERED_STREAK}</span>
                     </span>
                     <span className="fold-indicator">展开</span>
                   </summary>
@@ -3075,6 +3392,14 @@ function MistakeBookScreen({ mistakes, onBack, onMarkMastered, onStartPractice }
                       <span>近义词</span>
                       {formatWordDetail(entry.synonym)}
                     </p>
+                    <p className="mistake-detail-card detail-short">
+                      <span>来源</span>
+                      {entry.source}
+                    </p>
+                    <p className="mistake-detail-card detail-short">
+                      <span>最近出错</span>
+                      {formatMistakeDate(entry.lastMissedAt)}
+                    </p>
                   </div>
 
                   <div className="mistake-actions">
@@ -3098,9 +3423,9 @@ function MistakeBookScreen({ mistakes, onBack, onMarkMastered, onStartPractice }
 
 function ShopScreen({ wallet, inventory, shopMessage, onBuy, onBack }) {
   return (
-    <section className="screen active">
-      <div className="terminal-window">
-        <header className="terminal-header">
+    <section className="screen active system-screen shop-screen">
+      <div className="terminal-window game-menu-shell system-shell">
+        <header className="terminal-header menu-header">
           <span>道具商店</span>
           <span>{wallet} 积分</span>
         </header>
@@ -3367,18 +3692,56 @@ function buildReviewStatText(word) {
   return parts.join("，") || `出现 ${word.timesSeen || 1} 次`;
 }
 
+function buildResultRewardStats(resultSummary, reviewWords) {
+  const scoreMatch = String(resultSummary || "").match(/本局积分\s*(\d+)/);
+  const killMatch = String(resultSummary || "").match(/击杀\s*(\d+)/);
+  const score = scoreMatch ? Number(scoreMatch[1]) : reviewWords.reduce((sum, word) => sum + (word.points || 0), 0);
+  const kills = killMatch ? Number(killMatch[1]) : reviewWords.reduce((sum, word) => sum + (word.correctCount || 0) + (word.assistedCount || 0), 0);
+  const missed = reviewWords.reduce((sum, word) => sum + (word.missedCount || 0), 0);
+  const assisted = reviewWords.reduce((sum, word) => sum + (word.assistedCount || 0), 0);
+
+  return { score, kills, missed, assisted };
+}
+
 function ResultScreen({ resultSummary, reviewWords, onBack }) {
+  const rewardStats = buildResultRewardStats(resultSummary, reviewWords);
+
   return (
-    <section className="screen active">
-      <div className="terminal-window">
-        <header className="terminal-header">
+    <section className="screen active system-screen result-screen">
+      <div className="terminal-window game-menu-shell system-shell">
+        <header className="terminal-header menu-header">
           <span>战斗结算</span>
           <span>单词复习</span>
         </header>
 
         <div className="terminal-body">
-          <h2 className="result-title">本局完成</h2>
-          <p className="result-summary">{resultSummary}</p>
+          <section className="result-reward-panel">
+            <div className="result-reward-main">
+              <span className="label">本局完成</span>
+              <h2 className="result-title">战斗奖励</h2>
+              <p className="result-summary">{resultSummary}</p>
+            </div>
+            <div className="result-reward-stats">
+              <p>
+                <span>获得积分</span>
+                <strong>
+                  <AnimatedNumber value={rewardStats.score} />
+                </strong>
+              </p>
+              <p>
+                <span>击杀</span>
+                <strong>{rewardStats.kills}</strong>
+              </p>
+              <p>
+                <span>错题</span>
+                <strong>{rewardStats.missed}</strong>
+              </p>
+              <p>
+                <span>道具</span>
+                <strong>{rewardStats.assisted}</strong>
+              </p>
+            </div>
+          </section>
           <h3 className="review-title">本局单词表</h3>
 
           <div className="review-list">
